@@ -48,13 +48,18 @@ public class FileCleaningTracker {
     // Note: fields are package protected to allow use by test cases
 
     /**
-     * The reaper thread.
+     * Reaper 翻译过来是“收割器”。这里直接继承 Thread，也行吧，不过应该可以优化为实现 Runnable。
      */
     private final class Reaper extends Thread {
-        /** Constructs a new Reaper */
+        /**
+         * Constructs a new Reaper
+         */
         Reaper() {
+            // 设置线程名
             super("File Reaper");
+            // 设置线程优先级，最大
             setPriority(MAX_PRIORITY);
+            // 守护进程，不阻止程序结束
             setDaemon(true);
         }
 
@@ -65,16 +70,26 @@ public class FileCleaningTracker {
         @Override
         public void run() {
             // thread exits when exitWhenFinished is true and there are no more tracked objects
+            // 终结条件就是：调用了 exit，且 trackers 空
+            // 这样考虑到了尽管 exit 了，但是依然有任务需要执行，那么还会继续监控直到结束
+            // 同时，exit 之后不再接受新的任务
+            // 🤔 这里用 trackers.isEmpty()
             while (!exitWhenFinished || !trackers.isEmpty()) {
                 try {
                     // Wait for a tracker to remove.
+                    // ReferenceQueue 引用队列 remove(内部有阻塞效果，且无限超时)
+                    // 阻塞是通过 synchronized 监视器锁 Object.wait(0) 完成的
                     final Tracker tracker = (Tracker) q.remove(); // cannot return null
+
+                    // 若 ReferenceQueue 有元素，说明 referent 被 GC 了，这时候从队列中移除，同时也删除 Tracker
                     trackers.remove(tracker);
                     if (!tracker.delete()) {
                         deleteFailures.add(tracker.getPath());
                     }
                     tracker.clear();
                 } catch (final InterruptedException e) {
+                    // 这里选择继续，当调用 exit 时，会 interrupt 该线程，不过可能最多也就是将 ReferenceQueue 从 WAIT 状态变成 RUNNABLE
+                    // 然后继续循环
                     continue;
                 }
             }
@@ -88,24 +103,28 @@ public class FileCleaningTracker {
 
         /**
          * The full path to the file being tracked.
+         * 正在跟踪的文件的全路径
          */
         private final String path;
 
         /**
          * The strategy for deleting files.
+         * 删除文件的策略。就是普通删除，还是强制删除
          */
         private final FileDeleteStrategy deleteStrategy;
 
         /**
          * Constructs an instance of this class from the supplied parameters.
          *
-         * @param path  the full path to the file to be tracked, not null
-         * @param deleteStrategy  the strategy to delete the file, null means normal
-         * @param marker  the marker object used to track the file, not null
-         * @param queue  the queue on to which the tracker will be pushed, not null
+         * @param path           the full path to the file to be tracked, not null
+         * @param deleteStrategy the strategy to delete the file, null means normal
+         * @param marker         the marker object used to track the file, not null
+         * @param queue          the queue on to which the tracker will be pushed, not null
          */
         Tracker(final String path, final FileDeleteStrategy deleteStrategy, final Object marker,
                 final ReferenceQueue<? super Object> queue) {
+            // super 这里就是父类 PhantomReference
+            // 传入两个对象，一个是虚引用对象，还有个是引用队列
             super(marker, queue);
             this.path = path;
             this.deleteStrategy = deleteStrategy == null ? FileDeleteStrategy.NORMAL : deleteStrategy;
@@ -115,9 +134,10 @@ public class FileCleaningTracker {
          * Deletes the file associated with this tracker instance.
          *
          * @return {@code true} if the file was deleted successfully;
-         *         {@code false} otherwise.
+         * {@code false} otherwise.
          */
         public boolean delete() {
+            // 如果对象被回收，就会放到引用队列中，然后被线程删除
             return deleteStrategy.deleteQuietly(new File(path));
         }
 
@@ -166,27 +186,35 @@ public class FileCleaningTracker {
     /**
      * Adds a tracker to the list of trackers.
      *
-     * @param path  the full path to the file to be tracked, not null
-     * @param marker  the marker object used to track the file, not null
-     * @param deleteStrategy  the strategy to delete the file, null means normal
+     * @param path           the full path to the file to be tracked, not null
+     * @param marker         the marker object used to track the file, not null
+     * @param deleteStrategy the strategy to delete the file, null means normal
      */
     private synchronized void addTracker(final String path, final Object marker, final FileDeleteStrategy
             deleteStrategy) {
         // synchronized block protects reaper
+        // 停止之后不再接受新任务
         if (exitWhenFinished) {
             throw new IllegalStateException("No new trackers can be added once exitWhenFinished() is called");
         }
+        // 惰性启动线程
         if (reaper == null) {
             reaper = new Reaper();
             reaper.start();
         }
+
+        // 注意：第 4 个参数 ReferenceQueue 是当前对象的属性
         trackers.add(new Tracker(path, deleteStrategy, marker, q));
     }
 
     /**
      * Call this method to cause the file cleaner thread to terminate when
      * there are no more objects being tracked for deletion.
+     * 调用此方法可以是的文件清理线程在没有更多对象需要跟踪删除时终止。
      * <p>
+     * 一般，你不需要调用这个方法，因为 JVM 退出时，文件清理线程会自动退出。
+     * 什么时候需要这个方法，一般是 Servlet Container 中，不同的 Web 由不同的类加载器加载，
+     * 即使 Web 关闭，类加载器也终止了，但是 Servlet Container 没有停止，这个线程可能依然继续存在。
      * In a simple environment, you don't need this method as the file cleaner
      * thread will simply exit when the JVM exits. In a more complex environment,
      * with multiple class loaders (such as an application server), you should be
@@ -240,8 +268,8 @@ public class FileCleaningTracker {
      * when the marker instance is garbage collected.
      * The {@link FileDeleteStrategy#NORMAL normal} deletion strategy will be used.
      *
-     * @param file  the file to be tracked, not null
-     * @param marker  the marker object used to track the file, not null
+     * @param file   the file to be tracked, not null
+     * @param marker the marker object used to track the file, not null
      * @throws NullPointerException if the file is null
      */
     public void track(final File file, final Object marker) {
@@ -253,9 +281,9 @@ public class FileCleaningTracker {
      * when the marker instance is garbage collected.
      * The specified deletion strategy is used.
      *
-     * @param file  the file to be tracked, not null
-     * @param marker  the marker object used to track the file, not null
-     * @param deleteStrategy  the strategy to delete the file, null means normal
+     * @param file           the file to be tracked, not null
+     * @param marker         the marker object used to track the file, not null
+     * @param deleteStrategy the strategy to delete the file, null means normal
      * @throws NullPointerException if the file is null
      */
     public void track(final File file, final Object marker, final FileDeleteStrategy deleteStrategy) {
@@ -268,8 +296,8 @@ public class FileCleaningTracker {
      * when the marker instance is garbage collected.
      * The {@link FileDeleteStrategy#NORMAL normal} deletion strategy will be used.
      *
-     * @param file  the file to be tracked, not null
-     * @param marker  the marker object used to track the file, not null
+     * @param file   the file to be tracked, not null
+     * @param marker the marker object used to track the file, not null
      * @throws NullPointerException if the file is null
      * @since 2.14.0
      */
@@ -282,9 +310,9 @@ public class FileCleaningTracker {
      * when the marker instance is garbage collected.
      * The specified deletion strategy is used.
      *
-     * @param file  the file to be tracked, not null
-     * @param marker  the marker object used to track the file, not null
-     * @param deleteStrategy  the strategy to delete the file, null means normal
+     * @param file           the file to be tracked, not null
+     * @param marker         the marker object used to track the file, not null
+     * @param deleteStrategy the strategy to delete the file, null means normal
      * @throws NullPointerException if the file is null
      * @since 2.14.0
      */
@@ -298,8 +326,8 @@ public class FileCleaningTracker {
      * when the marker instance is garbage collected.
      * The {@link FileDeleteStrategy#NORMAL normal} deletion strategy will be used.
      *
-     * @param path  the full path to the file to be tracked, not null
-     * @param marker  the marker object used to track the file, not null
+     * @param path   the full path to the file to be tracked, not null
+     * @param marker the marker object used to track the file, not null
      * @throws NullPointerException if the path is null
      */
     public void track(final String path, final Object marker) {
@@ -311,9 +339,9 @@ public class FileCleaningTracker {
      * when the marker instance is garbage collected.
      * The specified deletion strategy is used.
      *
-     * @param path  the full path to the file to be tracked, not null
-     * @param marker  the marker object used to track the file, not null
-     * @param deleteStrategy  the strategy to delete the file, null means normal
+     * @param path           the full path to the file to be tracked, not null
+     * @param marker         the marker object used to track the file, not null
+     * @param deleteStrategy the strategy to delete the file, null means normal
      * @throws NullPointerException if the path is null
      */
     public void track(final String path, final Object marker, final FileDeleteStrategy deleteStrategy) {

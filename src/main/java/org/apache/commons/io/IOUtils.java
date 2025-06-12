@@ -1377,6 +1377,7 @@ public class IOUtils {
      * @since 2.9.0
      */
     public static long copy(final URL url, final File file) throws IOException {
+        // 转换为 Path，再转换为 OutputStream
         try (OutputStream outputStream = Files.newOutputStream(Objects.requireNonNull(file, "file").toPath())) {
             return copy(url, outputStream);
         }
